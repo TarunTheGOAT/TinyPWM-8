@@ -1,7 +1,12 @@
 ![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
 
-# Tiny Tapeout Verilog Project Template
+# V-SPACE Demo Hardware Stopwatch
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/AdvaittejPS/vspace-280326-demo/blob/main/workshop/V_SPACE_demo_280326_notebook.ipynb)
+
+**Welcome to the V-SPACE Bootcamp!** Click the badge above to launch the interactive chip design environment directly in your browser.
+
+---
 - [Read the documentation for project](docs/info.md)
 
 ## What is Tiny Tapeout?
