@@ -1,6 +1,6 @@
 `default_nettype none
 
-module tt_um_advaittej_stopwatch #(
+module tt_um_i2c_pwm #(
     parameter CLOCKS_PER_SECOND = 24'd9_999_999
 )(
     // DO NOT CHANGE THESE NAMES!!
@@ -15,72 +15,92 @@ module tt_um_advaittej_stopwatch #(
     input  wire       rst_n     // reset_n - low to reset
 );
 
-    // Intuitive aliasing ie translating TT to readable names
-    assign uio_out = 8'b0; // Tie off unused pins to prevent errors
-    assign uio_oe  = 8'b0;
+   // I2C Signal Definitions
+   wire scl = ui_in[0];
+   wire sda_i = ui_in[1];
+   reg  sda_o;
 
-    // Inverting active-low reset so 1 means reset now for our logic
-    wire reset_active = !rst_n;       
-    
-    // Pin 0 of input block is button
-    wire start_pause_btn = ui_in[0];  
-    
-    // Internal wire for 7-segment data
-    wire [6:0] led_segments;          
+   // Assign outputs
+   assign uo_out[1]   = sda_o;
+   assign uo_out[7:2] = 6'b0;
+   assign uio_oe      = 8'b0;
+   assign uio_out     = 8'b0;
 
-    // Drive physical output pins with our internal data
-    assign uo_out[6:0] = led_segments; 
-    assign uo_out[7]   = 1'b0; // Decimal point off
+   // Synchronizers to prevent metastability
+   reg [1:0] scl_sync, sda_sync;
+   always @(posedge clk) begin
+      scl_sync <= {scl_sync[0], scl};
+      sda_sync <= {sda_sync[0], sda_i};
+   end
 
-    // CLOCK DIVIDER
-    reg [23:0] clock_counter;
-    wire one_second_pulse = (clock_counter == CLOCKS_PER_SECOND);
+   // Start/Stop detection
+   wire start_bit = (scl_sync[1] && !sda_sync[0] && sda_sync[1]);
 
-    always @(posedge clk or posedge reset_active) begin
-        if (reset_active) begin
-            clock_counter <= 0;
-        end else if (start_pause_btn) begin
-            if (one_second_pulse) begin
-                clock_counter <= 0;
-            end else begin
-                clock_counter <= clock_counter + 1;
-            end
-        end
-    end
+   // I2C State Machine
+   reg [2:0] state;
+   reg [3:0] bit_ptr;
+   reg [7:0] shift_reg;
+   reg [7:0] reg_addr;
 
-    // DIGIT COUNTER: counts 0 to 9
-    reg [3:0] current_digit;
+   // Internal Registers
+   reg [7:0] duty_cycle;
+   reg [7:0] prescaler;
 
-    always @(posedge clk or posedge reset_active) begin
-        if (reset_active) begin
-            current_digit <= 0;
-        end else if (start_pause_btn && one_second_pulse) begin
-            if (current_digit == 9) begin
-                current_digit <= 0;
-            end else begin
-                current_digit <= current_digit + 1;
-            end
-        end
-    end
+   localparam IDLE = 0, ADDR = 1, GET_REG = 2, WRITE_VAL = 3, ACK = 4;
 
-    // 7-SEGMENT DECODER: translates to LEDs
-    reg [6:0] decoded_leds;
-    assign led_segments = decoded_leds;
+   always @(posedge clk or negedge rst_n) begin
+      if (!rst_n) begin
+         state <= IDLE;
+         duty_cycle <= 8'h80;
+         prescaler <= 8'h00;
+         sda_o <= 1'b1;
+      end else if (start_bit) begin
+         state <= ADDR;
+         bit_ptr <= 0;
+      end else begin
+         case (state)
+           ADDR: begin
+              // Bit shifting
+              if (bit_ptr == 8) state <= (shift_reg[7:1] == 7'h3C) ? GET_REG : IDLE;
+           end
+           GET_REG: begin
+              if (bit_ptr == 8) begin
+                 reg_addr <= shift_reg;
+                 state <= ACK;
+              end
+           end
+           WRITE_VAL: begin
+              if (bit_ptr == 8) begin
+                 if (reg_addr == 8'h00) duty_cycle <= shift_reg;
+                 else if (reg_addr == 8'h01) prescaler <= shift_reg;
+                 state <= ACK;
+              end
+           end
+           ACK: begin
+              sda_o <= 1'b0;
+              state <= (state == GET_REG) ? WRITE_VAL : IDLE;
+           end
+         endcase // case (state)
+      end // else: !if(start_bit)
+   end // always @ (posedge clk or negedge rst_n)
 
-    always @(*) begin
-        case (current_digit)
-            4'd0: decoded_leds = 7'b0111111;
-            4'd1: decoded_leds = 7'b0000110;
-            4'd2: decoded_leds = 7'b1011011;
-            4'd3: decoded_leds = 7'b1001111;
-            4'd4: decoded_leds = 7'b1100110;
-            4'd5: decoded_leds = 7'b1101101;
-            4'd6: decoded_leds = 7'b1111101;
-            4'd7: decoded_leds = 7'b0000111;
-            4'd8: decoded_leds = 7'b1111111;
-            4'd9: decoded_leds = 7'b1101111;
-            default: decoded_leds = 7'b0000000;
-        endcase
-    end
+   // PWM Engine with Prescalar
+   reg [7:0] p_cnt;
+   reg [7:0] pwm_cnt;
 
+   always @(posedge clk or negedge rst_n) begin
+      if (!rst_n) begin
+         p_cnt <= 0;
+         pwm_cnt <= 0;
+      end else begin
+         if (p_cnt >= prescaler) begin
+            p_cnt <= 0;
+            pwm_cnt <= pwm_cnt + 1;
+         end else begin
+            p_cnt <= p_cnt + 1;
+         end
+      end // else: !if(!rst_n)
+   end // always @ (posedge clk or negedge rst_n)
+
+   assign uo_out[0] = (pwm_cnt < duty_cycle);
 endmodule
