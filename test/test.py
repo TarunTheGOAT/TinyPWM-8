@@ -1,87 +1,95 @@
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, FallingEdge
+from cocotb.triggers import Timer, RisingEdge, FallingEdge, ClockCycles
 
-# REFERENCE MODEL (Golden Vector Generator)
-class StopwatchModel:
-    def __init__(self):
-        self.digit = 0
-        self.running = False
-        # 7-segment hex values for 0-9
-        self.segments = [
-            0b0111111, 0b0000110, 0b1011011, 0b1001111, 0b1100110, 
-            0b1101101, 0b1111101, 0b0000111, 0b1111111, 0b1101111
-        ]
+async def i2c_write(dut, address, reg_addr, value):
+    """Helper to perform an I2C write transaction"""
+    # Start Condition: SDA goes low while SCL is high
+    dut.ui_in.value = 0b01  # SCL=1, SDA=0
+    await ClockCycles(dut.clk, 10)
 
-    def reset(self):
-        self.digit = 0
-        self.running = False
+    # Send 7-bit Address + Write Bit (0)
+    full_addr = (address << 1) | 0
+    for i in range(7, -1, -1):
+        bit = (full_addr >> i) & 1
+        dut.ui_in.value = (0 << 1) | bit # SCL low, set SDA
+        await ClockCycles(dut.clk, 10)
+        dut.ui_in.value = (1 << 1) | bit # SCL high
+        await ClockCycles(dut.clk, 10)
 
-    def set_run_state(self, state):
-        self.running = bool(state)
+    # ACK bit from Slave
+    dut.ui_in.value = 0b00 # SCL low
+    await ClockCycles(dut.clk, 10)
+    dut.ui_in.value = 0b10 # SCL high
+    await ClockCycles(dut.clk, 10)
 
-    def tick(self):
-        if self.running:
-            if self.digit == 9:
-                self.digit = 0
-            else:
-                self.digit += 1
+    # Send Register Address
+    for i in range(7, -1, -1):
+        bit = (reg_addr >> i) & 1
+        dut.ui_in.value = (0 << 1) | bit
+        await ClockCycles(dut.clk, 10)
+        dut.ui_in.value = (1 << 1) | bit
+        await ClockCycles(dut.clk, 10)
 
-    def get_expected_output(self):
-        return self.segments[self.digit]
+    # ACK
+    dut.ui_in.value = 0b10
+    await ClockCycles(dut.clk, 10)
 
-# TEST SUITE
+    # Send Data Value
+    for i in range(7, -1, -1):
+        bit = (value >> i) & 1
+        dut.ui_in.value = (0 << 1) | bit
+        await ClockCycles(dut.clk, 10)
+        dut.ui_in.value = (1 << 1) | bit
+        await ClockCycles(dut.clk, 10)
+
+    # ACK and Stop
+    dut.ui_in.value = 0b10
+    await ClockCycles(dut.clk, 10)
+    dut.ui_in.value = 0b11 # Stop: SDA high while SCL high
+    await ClockCycles(dut.clk, 10)
+
 @cocotb.test()
-async def test_stopwatch_golden_vectors(dut):
-    dut._log.info("Starting Golden Vector Stopwatch Test")
-    
-    # Initialize software reference model
-    model = StopwatchModel()
-
-    # Set the clock period (Using 10us to match the official TT template)
-    clock = Clock(dut.clk, 10, unit="us")
+async def test_i2c_pwm_logic(dut):
+    # Setup Clock (100MHz for fast simulation)
+    clock = Clock(dut.clk, 10, unit="ns")
     cocotb.start_soon(clock.start())
 
-    # Phase 1: Reset Sequence
-    dut._log.info("Resetting design")
-    dut.ena.value = 1
-    dut.ui_in.value = 0
-    dut.uio_in.value = 0
+    # Initialize
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
+    dut.ui_in.value = 0b11 # SCL/SDA high (Idle)
+    dut.ena.value = 1
+    await ClockCycles(dut.clk, 5)
     dut.rst_n.value = 1
-    model.reset()
-    await ClockCycles(dut.clk, 2)
-    
-    assert int(dut.uo_out.value) == model.get_expected_output(), "Failed at Reset!"
+    await ClockCycles(dut.clk, 5)
 
-    # Phase 2: Counting Sequence
-    dut._log.info("Pressing Start Button")
-    dut.ui_in.value = 1
-    model.set_run_state(True)
+    # --- Test 1: Program 25% Duty Cycle ---
+    # Register 0x00 is Duty Cycle. 25% of 256 is 64 (0x40).
+    dut._log.info("Setting Duty Cycle to 25% (0x40)")
+    await i2c_write(dut, 0x3C, 0x00, 0x40)
 
-    # Test 15 'seconds' (Our tb.v overrides 1 second to equal 10 clocks)
-    for simulated_second in range(15):
-        await ClockCycles(dut.clk, 10)
-        await FallingEdge(dut.clk)
-        model.tick()
-        
-        expected = model.get_expected_output()
-        actual = int(dut.uo_out.value)
-        
-        dut._log.info(f"Sec {simulated_second + 1}: Expected {bin(expected)}, Got {bin(actual)}")
-        assert actual == expected, f"Mismatch at second {simulated_second + 1}!"
+    # Wait for a full PWM cycle (256 counts)
+    high_count = 0
+    for _ in range(256):
+        await RisingEdge(dut.clk)
+        if dut.uo_out[0].value == 1:
+            high_count += 1
 
-    # Phase 3: Pause Sequence
-    dut._log.info("Pressing Pause Button")
-    dut.ui_in.value = 0
-    model.set_run_state(False)
-    
-    # Wait 5 'seconds' to ensure it doesn't count while paused
-    for _ in range(5):
-        await ClockCycles(dut.clk, 10)
-        await FallingEdge(dut.clk)
-        model.tick()
-        
-    assert int(dut.uo_out.value) == model.get_expected_output(), "Pause failed! HW kept counting."
-    dut._log.info("All Golden Vector tests passed perfectly!")
+    dut._log.info(f"Measured High Pulses: {high_count}/256")
+    assert 60 <= high_count <= 68, f"Duty cycle mismatch! Expected ~64, got {high_count}"
+
+    # --- Test 2: Program Prescaler ---
+    # Register 0x01 is Prescaler. Set to 0x04 (Slow down PWM 4x)
+    dut._log.info("Setting Prescaler to 4")
+    await i2c_write(dut, 0x3C, 0x01, 0x04)
+
+    # Verify timing (each PWM increment should now take 5 clock cycles)
+    await RisingEdge(dut.uo_out[0])
+    start_time = cocotb.utils.get_sim_time(unit="ns")
+    await RisingEdge(dut.uo_out[0])
+    end_time = cocotb.utils.get_sim_time(unit="ns")
+
+    period = end_time - start_time
+    dut._log.info(f"Measured PWM Period: {period}ns")
+    # Expected: (Prescaler + 1) * 256 * clock_period = 5 * 256 * 10 = 12,800ns
+    assert 12700 <= period <= 12900, "Prescaler logic failed to slow down the signal!"
