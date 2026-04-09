@@ -16,12 +16,12 @@ module tt_um_i2c_pwm #(
 );
 
    // I2C Signal Definitions
-   wire scl = ui_in[0];
-   wire sda_i = ui_in[1];
-   reg  sda_o;
+   wire scl = ui_in[0]; // input clock, ie clock from master
+   wire sda_in = ui_in[1]; // input data
+   reg  sda_out;
 
    // Assign outputs
-   assign uo_out[1]   = sda_o;
+   assign uo_out[1]   = sda_out;
    assign uo_out[7:2] = 6'b0;
    assign uio_oe      = 8'b0;
    assign uio_out     = 8'b0;
@@ -29,23 +29,24 @@ module tt_um_i2c_pwm #(
    // Synchronizers to prevent metastability
    reg [1:0] scl_sync, sda_sync;
    always @(posedge clk) begin
-      scl_sync <= {scl_sync[0], scl};
-      sda_sync <= {sda_sync[0], sda_i};
+      scl_sync <= {scl_sync[0], scl}; // scl_sync = [previous scl value, current scl value]
+      sda_sync <= {sda_sync[0], sda_in}; // sda_sync = [previous sda_in, current sda_in]
    end
 
    // Start/Stop detection
+   // start_bit = when sda_i falls high to low (1 to 0) while scl_sync(scl) is high
    wire start_bit = (scl_sync[1] && !sda_sync[0] && sda_sync[1]);
 
-   // I2C State Machine
-   reg [2:0] state;
-   reg [3:0] bit_ptr;
-   reg [7:0] shift_reg;
-   reg [7:0] reg_addr;
+   reg [2:0] state; // state variable
+   reg [3:0] bit_count; // bit count - how many bits have been received so far
+   reg [7:0] shift_reg; // shift register - shifts the bits as more are received to form a full byte
+   reg [7:0] reg_addr; //
 
    // Internal Registers
    reg [7:0] duty_cycle;
    reg [7:0] prescaler;
 
+   // States
    localparam IDLE = 0, ADDR = 1, GET_REG = 2, WRITE_VAL = 3, ACK = 4;
 
    always @(posedge clk or negedge rst_n) begin
@@ -53,31 +54,31 @@ module tt_um_i2c_pwm #(
          state <= IDLE;
          duty_cycle <= 8'h80;
          prescaler <= 8'h00;
-         sda_o <= 1'b1;
+         sda_out <= 1'b1;
       end else if (start_bit) begin
          state <= ADDR;
-         bit_ptr <= 0;
+         bit_count <= 0;
       end else begin
          case (state)
            ADDR: begin
               // Bit shifting
-              if (bit_ptr == 8) state <= (shift_reg[7:1] == 7'h3C) ? GET_REG : IDLE;
+              if (bit_count == 8) state <= (shift_reg[7:1] == 7'h3C) ? GET_REG : IDLE;
            end
            GET_REG: begin
-              if (bit_ptr == 8) begin
+              if (bit_count == 8) begin
                  reg_addr <= shift_reg;
                  state <= ACK;
               end
            end
            WRITE_VAL: begin
-              if (bit_ptr == 8) begin
+              if (bit_count == 8) begin
                  if (reg_addr == 8'h00) duty_cycle <= shift_reg;
                  else if (reg_addr == 8'h01) prescaler <= shift_reg;
                  state <= ACK;
               end
            end
            ACK: begin
-              sda_o <= 1'b0;
+              sda_out <= 1'b0;
               state <= (state == GET_REG) ? WRITE_VAL : IDLE;
            end
          endcase // case (state)

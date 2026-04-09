@@ -28,7 +28,7 @@ module tb ();
 `endif
 
 // Instantiate OUR module. Hide the parameter during Gate Level tests.
-    tt_um_advaittej_stopwatch 
+    tt_um_i2c_pwm
 `ifndef GL_TEST
     #(
         .CLOCKS_PER_SECOND(24'd9) // 10 clocks = 1 second for fast testing

@@ -72,7 +72,7 @@ async def test_i2c_pwm_logic(dut):
     high_count = 0
     for _ in range(256):
         await RisingEdge(dut.clk)
-        if dut.uo_out[0].value == 1:
+        if int(dut.uo_out.value) & 0x01:
             high_count += 1
 
     dut._log.info(f"Measured High Pulses: {high_count}/256")
@@ -84,9 +84,9 @@ async def test_i2c_pwm_logic(dut):
     await i2c_write(dut, 0x3C, 0x01, 0x04)
 
     # Verify timing (each PWM increment should now take 5 clock cycles)
-    await RisingEdge(dut.uo_out[0])
+    await RisingEdge(dut.uo_out)
     start_time = cocotb.utils.get_sim_time(unit="ns")
-    await RisingEdge(dut.uo_out[0])
+    await RisingEdge(dut.uo_out)
     end_time = cocotb.utils.get_sim_time(unit="ns")
 
     period = end_time - start_time
