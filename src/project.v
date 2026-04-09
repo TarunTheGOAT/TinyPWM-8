@@ -33,9 +33,10 @@ module tt_um_i2c_pwm #(
       sda_sync <= {sda_sync[0], sda_in}; // sda_sync = [previous sda_in, current sda_in]
    end
 
-   wire scl_rise = (scl_sync == 2'b01);
-   wire scl_high = scl_sync[1];
-   wire scl_fall = (!scl_sync[0] && scl_sync[1]);
+   wire scl_rise = (scl_sync == 2'b10);
+   wire scl_fall = (scl_sync == 2'b01);
+   wire scl_high = scl_sync[0];
+
    // Start/Stop detection
    // start_bit = when sda_i falls high to low (1 to 0) while scl_sync(scl) is high
    wire start_bit = (scl_high && !sda_sync[0] && sda_sync[1]);
@@ -53,6 +54,7 @@ module tt_um_i2c_pwm #(
    // States
    localparam IDLE = 0, ADDR = 1, GET_REG = 2, WRITE_VAL = 3, ACK = 4;
 
+
    always @(posedge clk or negedge rst_n) begin
       if (!rst_n) begin
          state      <= IDLE;
@@ -61,57 +63,75 @@ module tt_um_i2c_pwm #(
          sda_out    <= 1'b1;
          bit_count  <= 0;
          shift_reg  <= 0;
-      end else begin
+         reg_addr   <= 0;
+         next_state <= IDLE;
 
+      end else begin
          // Default: release SDA unless ACKing
          sda_out <= 1'b1;
-
-         // Shift in bits on SCL rising edge
-         if (scl_rise && state != ACK) begin
-            shift_reg  <= {shift_reg[6:0], sda_sync[1]};
-            bit_count  <= bit_count + 1;
-         end
 
          case (state)
 
            IDLE: begin
+              bit_count <= 0;
               if (start_bit) begin
                  state     <= ADDR;
-                 bit_count <= 0;
+                 shift_reg <= 0;
               end
            end
 
            ADDR: begin
-              if (bit_count == 8) begin
-                 bit_count <= 0;
-                 if (shift_reg[7:1] == 7'h3C && shift_reg[0] == 0) begin
-                    next_state <= GET_REG;
-                    state <= ACK;
+              if (scl_rise) begin
+                 shift_reg <= {shift_reg[6:0], sda_sync[1]};
+
+                 if (bit_count == 7) begin
+                    bit_count <= 0;
+
+                    if ({shift_reg[6:0], sda_sync[1]}[7:1] == 7'h3C &&
+                        {shift_reg[6:0], sda_sync[1]}[0]   == 1'b0) begin
+                       next_state <= GET_REG;
+                       state      <= ACK;
+                    end else begin
+                       state <= IDLE;
+                    end
                  end else begin
-                    state <= IDLE;
+                    bit_count <= bit_count + 1;
                  end
               end
            end
 
            GET_REG: begin
-              if (bit_count == 8) begin
-                 reg_addr   <= shift_reg;
-                 bit_count  <= 0;
-                 next_state <= WRITE_VAL;
-                 state      <= ACK;
+              if (scl_rise) begin
+                 shift_reg <= {shift_reg[6:0], sda_sync[1]};
+
+                 if (bit_count == 7) begin
+                    reg_addr   <= {shift_reg[6:0], sda_sync[1]};
+                    bit_count  <= 0;
+                    next_state <= WRITE_VAL;
+                    state      <= ACK;
+                 end else begin
+                    bit_count <= bit_count + 1;
+                 end
               end
            end
 
            WRITE_VAL: begin
-              if (bit_count == 8) begin
-                 if (reg_addr == 8'h00)
-                   duty_cycle <= shift_reg;
-                 else if (reg_addr == 8'h01)
-                   prescaler <= shift_reg;
+              if (scl_rise) begin
+                 shift_reg <= {shift_reg[6:0], sda_sync[1]};
 
-                 bit_count  <= 0;
-                 next_state <= IDLE;
-                 state      <= ACK;
+                 if (bit_count == 7) begin
+                    bit_count <= 0;
+
+                    if (reg_addr == 8'h00)
+                      duty_cycle <= {shift_reg[6:0], sda_sync[1]};
+                    else if (reg_addr == 8'h01)
+                      prescaler <= {shift_reg[6:0], sda_sync[1]};
+
+                    next_state <= IDLE;
+                    state      <= ACK;
+                 end else begin
+                    bit_count <= bit_count + 1;
+                 end
               end
            end
 
