@@ -39,8 +39,8 @@ module tt_um_i2c_pwm #(
 
    reg [2:0] state; // state variable
    reg [3:0] bit_count; // bit count - how many bits have been received so far
-   reg [7:0] shift_reg; // shift register - shifts the bits as more are received to form a full byte
-   reg [7:0] reg_addr; //
+   reg [7:0] shift_reg; // shift register - stores the data by shifting the bits as more are received to form a full byte
+   reg [7:0] reg_addr; // states which Internal register the master want to access: duty_cycle or prescaler
 
    // Internal Registers
    reg [7:0] duty_cycle;
@@ -48,6 +48,8 @@ module tt_um_i2c_pwm #(
 
    // States
    localparam IDLE = 0, ADDR = 1, GET_REG = 2, WRITE_VAL = 3, ACK = 4;
+
+   // TODO: need to fix fsm
 
    always @(posedge clk or negedge rst_n) begin
       if (!rst_n) begin
@@ -61,16 +63,16 @@ module tt_um_i2c_pwm #(
       end else begin
          case (state)
            ADDR: begin
-              // Bit shifting
+              // Logical Error
               if (bit_count == 8) state <= (shift_reg[7:1] == 7'h3C) ? GET_REG : IDLE;
            end
-           GET_REG: begin
+           GET_REG: begin // gets the Internal Register address
               if (bit_count == 8) begin
                  reg_addr <= shift_reg;
                  state <= ACK;
               end
            end
-           WRITE_VAL: begin
+           WRITE_VAL: begin // stores data into duty_cycle or prescaler depending on reg_addr
               if (bit_count == 8) begin
                  if (reg_addr == 8'h00) duty_cycle <= shift_reg;
                  else if (reg_addr == 8'h01) prescaler <= shift_reg;
@@ -78,6 +80,7 @@ module tt_um_i2c_pwm #(
               end
            end
            ACK: begin
+              // Logical Error
               sda_out <= 1'b0;
               state <= (state == GET_REG) ? WRITE_VAL : IDLE;
            end
