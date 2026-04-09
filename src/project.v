@@ -16,44 +16,57 @@ module tt_um_i2c_pwm #(
 );
 
    // I2C Signal Definitions
-   wire scl = ui_in[0]; // input clock, ie clock from master
+   wire scl    = ui_in[0]; // input clock from master
    wire sda_in = ui_in[1]; // input data
    reg  sda_out;
 
+   // PWM Engine with Prescaler
+   reg [7:0] p_cnt;
+   reg [7:0] pwm_cnt;
+
+   // Internal Registers
+   reg [7:0] duty_cycle;
+   reg [7:0] prescaler;
+
    // Assign outputs
+   // NOTE: uo_out[0] is assigned only once (below via continuous assign)
+   assign uo_out[0]   = (pwm_cnt < duty_cycle);
    assign uo_out[1]   = sda_out;
    assign uo_out[7:2] = 6'b0;
    assign uio_oe      = 8'b0;
    assign uio_out     = 8'b0;
 
    // Synchronizers to prevent metastability
+   // Convention: sync[0] = newest sample, sync[1] = one clock older
    reg [1:0] scl_sync, sda_sync;
    always @(posedge clk) begin
-      scl_sync <= {scl_sync[0], scl}; // scl_sync = [previous scl value, current scl value]
-      sda_sync <= {sda_sync[0], sda_in}; // sda_sync = [previous sda_in, current sda_in]
+      scl_sync <= {scl_sync[0], scl};
+      sda_sync <= {sda_sync[0], sda_in};
    end
 
-   wire scl_rise = (scl_sync == 2'b10);
-   wire scl_fall = (scl_sync == 2'b01);
+   // scl_sync[0] = current (new), scl_sync[1] = previous (old)
+   // Rising edge:  old=0, new=1  → 2'b01
+   // Falling edge: old=1, new=0  → 2'b10
+   wire scl_rise = (scl_sync == 2'b01); // FIX: was 2'b10
+   wire scl_fall = (scl_sync == 2'b10); // FIX: was 2'b01
    wire scl_high = scl_sync[0];
 
    // Start/Stop detection
-   // start_bit = when sda_i falls high to low (1 to 0) while scl_sync(scl) is high
-   wire start_bit = (scl_high && !sda_sync[0] && sda_sync[1]);
-   wire stop_bit = (scl_high && sda_sync[0] && !sda_sync[1]);
+   // START: SDA falls (1→0) while SCL is high
+   wire start_bit = (scl_high && !sda_sync[0] &&  sda_sync[1]);
+   // STOP:  SDA rises (0→1) while SCL is high
+   wire stop_bit  = (scl_high &&  sda_sync[0] && !sda_sync[1]);
 
-   reg [2:0] state, next_state; // state variable
-   reg [3:0] bit_count; // bit count - how many bits have been received so far
-   reg [7:0] shift_reg; // shift register - stores the data by shifting the bits as more are received to form a full byte
-   reg [7:0] reg_addr; // states which Internal register the master want to access: duty_cycle or prescaler
+   reg [2:0] state, next_state;
+   reg [3:0] bit_count;
+   reg [7:0] shift_reg;
+   reg [7:0] reg_addr;
 
-   // Internal Registers
-   reg [7:0] duty_cycle;
-   reg [7:0] prescaler;
+   // Sample SDA on SCL rising edge: use sda_sync[0] (the stable current value)
+   wire [7:0] next_byte = {shift_reg[6:0], sda_sync[0]}; // FIX: was sda_sync[1]
 
    // States
    localparam IDLE = 0, ADDR = 1, GET_REG = 2, WRITE_VAL = 3, ACK = 4;
-
 
    always @(posedge clk or negedge rst_n) begin
       if (!rst_n) begin
@@ -67,8 +80,7 @@ module tt_um_i2c_pwm #(
          next_state <= IDLE;
 
       end else begin
-         // Default: release SDA unless ACKing
-         sda_out <= 1'b1;
+         sda_out <= 1'b1; // Default: release SDA
 
          case (state)
 
@@ -82,13 +94,11 @@ module tt_um_i2c_pwm #(
 
            ADDR: begin
               if (scl_rise) begin
-                 shift_reg <= {shift_reg[6:0], sda_sync[1]};
+                 shift_reg <= next_byte;
 
                  if (bit_count == 7) begin
                     bit_count <= 0;
-
-                    if ({shift_reg[6:0], sda_sync[1]}[7:1] == 7'h3C &&
-                        {shift_reg[6:0], sda_sync[1]}[0]   == 1'b0) begin
+                    if (next_byte[7:1] == 7'h3C && next_byte[0] == 1'b0) begin
                        next_state <= GET_REG;
                        state      <= ACK;
                     end else begin
@@ -102,10 +112,10 @@ module tt_um_i2c_pwm #(
 
            GET_REG: begin
               if (scl_rise) begin
-                 shift_reg <= {shift_reg[6:0], sda_sync[1]};
+                 shift_reg <= next_byte;
 
                  if (bit_count == 7) begin
-                    reg_addr   <= {shift_reg[6:0], sda_sync[1]};
+                    reg_addr   <= next_byte;
                     bit_count  <= 0;
                     next_state <= WRITE_VAL;
                     state      <= ACK;
@@ -117,16 +127,14 @@ module tt_um_i2c_pwm #(
 
            WRITE_VAL: begin
               if (scl_rise) begin
-                 shift_reg <= {shift_reg[6:0], sda_sync[1]};
+                 shift_reg <= next_byte;
 
                  if (bit_count == 7) begin
                     bit_count <= 0;
-
                     if (reg_addr == 8'h00)
-                      duty_cycle <= {shift_reg[6:0], sda_sync[1]};
+                      duty_cycle <= next_byte;
                     else if (reg_addr == 8'h01)
-                      prescaler <= {shift_reg[6:0], sda_sync[1]};
-
+                      prescaler <= next_byte;
                     next_state <= IDLE;
                     state      <= ACK;
                  end else begin
@@ -137,7 +145,6 @@ module tt_um_i2c_pwm #(
 
            ACK: begin
               sda_out <= 1'b0;
-
               if (scl_fall) begin
                  sda_out <= 1'b1;
                  state   <= next_state;
@@ -148,24 +155,19 @@ module tt_um_i2c_pwm #(
       end
    end
 
-   // PWM Engine with Prescalar
-   reg [7:0] p_cnt;
-   reg [7:0] pwm_cnt;
-
+   // PWM counter with prescaler
    always @(posedge clk or negedge rst_n) begin
       if (!rst_n) begin
-         p_cnt <= 0;
+         p_cnt   <= 0;
          pwm_cnt <= 0;
       end else begin
          if (p_cnt >= prescaler) begin
-            p_cnt <= 0;
+            p_cnt   <= 0;
             pwm_cnt <= pwm_cnt + 1;
          end else begin
             p_cnt <= p_cnt + 1;
          end
-      end // else: !if(!rst_n)
-   end // always @ (posedge clk or negedge rst_n)
-
-   assign uo_out[0] = (pwm_cnt < duty_cycle);
+      end
+   end
 
 endmodule
