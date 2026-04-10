@@ -3,11 +3,15 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
 
 # -------------------------------------------------
-# TIMING CONSTANT
-# Increase phases so the 2-stage synchronizer in
-# the RTL has plenty of time to see each transition
+# TIMING CONSTANTS
+# PHASE: clock cycles per I2C half-period
+# ACK_SETTLE: extra cycles after SCL rise before
+#   sampling SDA. In GL sim, gate delays + sync
+#   pipeline mean the FSM needs 2+ cycles after
+#   scl_rise before sda_out goes low.
 # -------------------------------------------------
-PHASE = 20  # clock cycles per I2C half-period
+PHASE      = 20
+ACK_SETTLE = 5   # extra clocks to wait inside ACK before sampling
 
 
 # -------------------------------------------------
@@ -37,7 +41,7 @@ def get_pwm_out(dut):
 # -------------------------------------------------
 def set_i2c_lines(dut, scl, master_sda):
     slave_sda = get_slave_sda(dut)
-    sda_line = master_sda & slave_sda
+    sda_line  = master_sda & slave_sda
     dut.ui_in.value = (sda_line << 1) | scl
 
 
@@ -59,8 +63,7 @@ async def wait_pwm_rise(dut):
 
 
 # -------------------------------------------------
-# CLOCK PULSE
-# SCL: LOW -> HIGH -> LOW with SDA held stable
+# CLOCK PULSE: SCL LOW -> HIGH -> LOW, SDA stable
 # -------------------------------------------------
 async def i2c_clock_pulse(dut, sda):
     set_i2c_lines(dut, 0, sda)
@@ -75,77 +78,86 @@ async def i2c_clock_pulse(dut, sda):
 
 # -------------------------------------------------
 # ACK PHASE
+# The slave's FSM transitions to ACK state on the
+# scl_rise of bit 7, then drives sda_out=0 on the
+# next posedge. In GL sim with #1 unit delays the
+# pipeline is:
+#   scl_rise detected (cycle N)
+#   FSM enters ACK, sda_out<=0 registered (cycle N+1)
+#   sda_out visible on uo_out (cycle N+1 + gate delay)
+# So we must wait ACK_SETTLE extra cycles after
+# raising SCL before we sample uo_out[1].
 # -------------------------------------------------
 async def i2c_ack_phase(dut):
-    # Master releases SDA (SCL still low)
+    # SCL low, master releases SDA
     set_i2c_lines(dut, 0, 1)
     await ClockCycles(dut.clk, PHASE)
 
-    # SCL HIGH -> slave should pull SDA low (ACK)
+    # SCL high -> FSM sees scl_rise on next posedge
     set_i2c_lines(dut, 1, 1)
-    await ClockCycles(dut.clk, PHASE)
+
+    # Wait PHASE cycles for SCL high period,
+    # then ACK_SETTLE more for FSM + gate propagation
+    await ClockCycles(dut.clk, PHASE + ACK_SETTLE)
 
     slave_sda = get_slave_sda(dut)
     dut._log.info(f"ACK bit = {slave_sda} (0=ACK, 1=NACK)")
     assert slave_sda == 0, "Expected ACK (SDA=0) but got NACK (SDA=1)"
 
-    # SCL LOW to finish ACK clock
+    # SCL low to finish ACK clock
     set_i2c_lines(dut, 0, 1)
     await ClockCycles(dut.clk, PHASE)
 
 
 # -------------------------------------------------
 # I2C WRITE
-# Correct START: SCL high and stable BEFORE SDA falls
+# START: SCL must be stable HIGH before SDA falls.
+# STOP:  SDA must rise while SCL is already HIGH.
 # -------------------------------------------------
 async def i2c_write(dut, address, reg_addr, value):
 
-    # --- IDLE: both lines high, let synchronizers settle ---
+    # IDLE: both lines high, let synchronizers settle
     set_i2c_lines(dut, 1, 1)
     await ClockCycles(dut.clk, PHASE * 2)
 
-    # --- START CONDITION ---
-    # Step 1: SCL high, SDA high (already idle, but be explicit)
+    # START CONDITION
+    # Step 1: SCL high, SDA high (explicit idle)
     set_i2c_lines(dut, 1, 1)
     await ClockCycles(dut.clk, PHASE)
-
-    # Step 2: SDA falls while SCL is HIGH -> this is the START
+    # Step 2: SDA falls while SCL is HIGH -> START
     set_i2c_lines(dut, 1, 0)
     await ClockCycles(dut.clk, PHASE)
-
-    # Step 3: SCL falls -> begin clocking data
+    # Step 3: SCL falls -> begin data
     set_i2c_lines(dut, 0, 0)
     await ClockCycles(dut.clk, PHASE)
 
-    # --- ADDRESS BYTE (7-bit address + R/W=0) ---
+    # ADDRESS BYTE (7-bit address + R/W=0)
     full_addr = (address << 1) | 0
     for i in range(7, -1, -1):
         await i2c_clock_pulse(dut, (full_addr >> i) & 1)
 
     await i2c_ack_phase(dut)
 
-    # --- REGISTER ADDRESS BYTE ---
+    # REGISTER ADDRESS BYTE
     for i in range(7, -1, -1):
         await i2c_clock_pulse(dut, (reg_addr >> i) & 1)
 
     await i2c_ack_phase(dut)
 
-    # --- DATA BYTE ---
+    # DATA BYTE
     for i in range(7, -1, -1):
         await i2c_clock_pulse(dut, (value >> i) & 1)
 
     await i2c_ack_phase(dut)
 
-    # --- STOP CONDITION ---
+    # STOP CONDITION
     # Step 1: SCL low, SDA low
     set_i2c_lines(dut, 0, 0)
     await ClockCycles(dut.clk, PHASE)
-
-    # Step 2: SCL rises while SDA is still low
+    # Step 2: SCL rises while SDA still low
     set_i2c_lines(dut, 1, 0)
     await ClockCycles(dut.clk, PHASE)
-
-    # Step 3: SDA rises while SCL is HIGH -> this is the STOP
+    # Step 3: SDA rises while SCL HIGH -> STOP
     set_i2c_lines(dut, 1, 1)
     await ClockCycles(dut.clk, PHASE * 2)
 
@@ -159,7 +171,7 @@ async def test_i2c_pwm_logic(dut):
     clock = Clock(dut.clk, 10, unit="ns")
     cocotb.start_soon(clock.start())
 
-    # --- Reset ---
+    # Reset
     dut.rst_n.value  = 0
     dut.ena.value    = 1
     dut.uio_in.value = 0
@@ -168,7 +180,7 @@ async def test_i2c_pwm_logic(dut):
     await ClockCycles(dut.clk, 10)
 
     dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 20)  # let sync regs clear after reset
+    await ClockCycles(dut.clk, 20)   # let sync regs clear after reset
 
     # ---------------------------------
     # TEST 1: Duty Cycle = 0x40 (25%)
