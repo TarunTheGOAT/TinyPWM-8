@@ -4,15 +4,25 @@ from cocotb.triggers import ClockCycles, RisingEdge
 
 
 # -------------------------------------------------
-# SAFE READ OF SLAVE SDA (handles X/Z)
+# SAFE READ OF SLAVE SDA (handles X/Z, packed bus)
 # -------------------------------------------------
 def get_slave_sda(dut):
-    bit = dut.uo_out[1].value
-
-    if bit.is_resolvable:
-        return int(bit)
+    val = dut.uo_out.value
+    if val.is_resolvable:
+        return (int(val) >> 1) & 1
     else:
         return 1   # Treat X/Z as released (HIGH)
+
+
+# -------------------------------------------------
+# SAFE READ OF PWM OUTPUT BIT 0
+# -------------------------------------------------
+def get_pwm_out(dut):
+    val = dut.uo_out.value
+    if val.is_resolvable:
+        return int(val) & 1
+    else:
+        return 0
 
 
 # -------------------------------------------------
@@ -22,6 +32,23 @@ def set_i2c_lines(dut, scl, master_sda):
     slave_sda = get_slave_sda(dut)
     sda_line = master_sda & slave_sda
     dut.ui_in.value = (sda_line << 1) | scl
+
+
+# -------------------------------------------------
+# WAIT FOR PWM RISING EDGE (uo_out[0]: 0 -> 1)
+# Cannot use RisingEdge on packed bus bit in GL sim
+# -------------------------------------------------
+async def wait_pwm_rise(dut):
+    # First wait until PWM output is LOW
+    while True:
+        await RisingEdge(dut.clk)
+        if get_pwm_out(dut) == 0:
+            break
+    # Then wait until PWM output goes HIGH
+    while True:
+        await RisingEdge(dut.clk)
+        if get_pwm_out(dut) == 1:
+            break
 
 
 # -------------------------------------------------
@@ -47,7 +74,7 @@ async def i2c_ack_phase(dut):
     set_i2c_lines(dut, 0, 1)
     await ClockCycles(dut.clk, 10)
 
-    # SCL HIGH → slave should drive ACK
+    # SCL HIGH -> slave should drive ACK
     set_i2c_lines(dut, 1, 1)
     await ClockCycles(dut.clk, 10)
 
@@ -137,9 +164,7 @@ async def test_i2c_pwm_logic(dut):
 
     for _ in range(256):
         await RisingEdge(dut.clk)
-
-        bit = dut.uo_out[0].value
-        if bit.is_resolvable and int(bit) == 1:
+        if get_pwm_out(dut) == 1:
             high_count += 1
 
     dut._log.info(f"Measured high_count = {high_count}")
@@ -161,7 +186,7 @@ async def test_i2c_pwm_logic(dut):
     end_time = 0
 
     while rise_count < 2:
-        await RisingEdge(dut.uo_out[0])
+        await wait_pwm_rise(dut)
 
         t = cocotb.utils.get_sim_time(unit="ns")
 
