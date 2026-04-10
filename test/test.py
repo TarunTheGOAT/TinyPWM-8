@@ -4,10 +4,22 @@ from cocotb.triggers import ClockCycles, RisingEdge
 
 
 # -------------------------------------------------
-# I2C LINE HANDLING (FIXED: OPEN-DRAIN WIRED-AND)
+# SAFE READ OF SLAVE SDA (handles X/Z)
+# -------------------------------------------------
+def get_slave_sda(dut):
+    bit = dut.uo_out[1].value
+
+    if bit.is_resolvable:
+        return int(bit)
+    else:
+        return 1   # Treat X/Z as released (HIGH)
+
+
+# -------------------------------------------------
+# I2C WIRED-AND LINE (OPEN-DRAIN)
 # -------------------------------------------------
 def set_i2c_lines(dut, scl, master_sda):
-    slave_sda = (int(dut.uo_out.value) >> 1) & 1
+    slave_sda = get_slave_sda(dut)
     sda_line = master_sda & slave_sda
     dut.ui_in.value = (sda_line << 1) | scl
 
@@ -27,10 +39,11 @@ async def i2c_clock_pulse(dut, sda):
 
 
 # -------------------------------------------------
-# ACK PHASE (FIXED)
+# ACK PHASE
 # -------------------------------------------------
 async def i2c_ack_phase(dut):
-    # Master releases SDA (sets to 1)
+
+    # Master releases SDA
     set_i2c_lines(dut, 0, 1)
     await ClockCycles(dut.clk, 10)
 
@@ -38,18 +51,18 @@ async def i2c_ack_phase(dut):
     set_i2c_lines(dut, 1, 1)
     await ClockCycles(dut.clk, 10)
 
-    # Read ACK from slave
-    slave_sda = (int(dut.uo_out.value) >> 1) & 1
+    slave_sda = get_slave_sda(dut)
+
     dut._log.info(f"ACK bit = {slave_sda} (0=ACK, 1=NACK)")
     assert slave_sda == 0, "Expected ACK (SDA=0) but got NACK (SDA=1)"
 
-    # Complete cycle
+    # Finish clock
     set_i2c_lines(dut, 0, 1)
     await ClockCycles(dut.clk, 10)
 
 
 # -------------------------------------------------
-# I2C WRITE TRANSACTION
+# I2C WRITE
 # -------------------------------------------------
 async def i2c_write(dut, address, reg_addr, value):
 
@@ -57,12 +70,13 @@ async def i2c_write(dut, address, reg_addr, value):
     set_i2c_lines(dut, 1, 1)
     await ClockCycles(dut.clk, 10)
 
-    # START condition
+    # START
     set_i2c_lines(dut, 1, 0)
     await ClockCycles(dut.clk, 10)
 
     # Address + Write bit
     full_addr = (address << 1) | 0
+
     for i in range(7, -1, -1):
         await i2c_clock_pulse(dut, (full_addr >> i) & 1)
 
@@ -80,7 +94,7 @@ async def i2c_write(dut, address, reg_addr, value):
 
     await i2c_ack_phase(dut)
 
-    # STOP condition
+    # STOP
     set_i2c_lines(dut, 0, 0)
     await ClockCycles(dut.clk, 10)
 
@@ -120,9 +134,12 @@ async def test_i2c_pwm_logic(dut):
     await ClockCycles(dut.clk, 20)
 
     high_count = 0
+
     for _ in range(256):
         await RisingEdge(dut.clk)
-        if (int(dut.uo_out.value) & 0x01):
+
+        bit = dut.uo_out[0].value
+        if bit.is_resolvable and int(bit) == 1:
             high_count += 1
 
     dut._log.info(f"Measured high_count = {high_count}")
@@ -146,14 +163,17 @@ async def test_i2c_pwm_logic(dut):
     while rise_count < 2:
         await RisingEdge(dut.uo_out[0])
 
+        t = cocotb.utils.get_sim_time(unit="ns")
+
         if rise_count == 0:
-            start_time = cocotb.utils.get_sim_time(unit="ns")
+            start_time = t
         elif rise_count == 1:
-            end_time = cocotb.utils.get_sim_time(unit="ns")
+            end_time = t
 
         rise_count += 1
 
     period = end_time - start_time
+
     dut._log.info(f"Measured PWM Period = {period} ns")
 
     assert 12000 <= period <= 13500, \
